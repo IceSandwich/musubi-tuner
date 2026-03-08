@@ -820,6 +820,33 @@ def load_zimage_model(
 
         return None, None
 
+    from safetensors.torch import load_file
+    import typing
+    old_weights = load_file(dit_path, device="cuda:0")
+    new_weights: typing.Dict[str, torch.Tensor] = {}
+    for key, value in old_weights.items():
+        shouldContinue = False
+        for k, v in replace_keys_reverse.items():
+            if k in key:
+                new_key = key.replace(k, v)
+                new_weights[new_key] = value
+                shouldContinue = True
+                break
+        if shouldContinue:
+            continue
+
+        if "attention.qkv.weight" in key:
+            for xk, xv in zip([key.replace("qkv", module) for module in ["to_q", "to_k", "to_v"]], list(torch.chunk(value, 3, dim=0))):
+                new_weights[xk] = xv
+            continue
+
+        new_weights[key] = value
+    del old_weights
+    info = model.load_state_dict(new_weights, strict=True, assign=True)
+    logger.info(f"Loaded DiT model from {dit_path}, info={info}")
+    return model
+
+
     hooks = WeightTransformHooks(split_hook=comfyui_z_image_weight_split_hook)
 
     # load model weights with dynamic fp8 optimization and LoRA merging if needed

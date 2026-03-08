@@ -297,6 +297,9 @@ def load_safetensors_with_fp8_optimization(
 
             keys = f.keys()
             for key in tqdm(keys, desc=f"Loading {os.path.basename(model_file)}", unit="key"):
+                if key.endswith("_scale"): # ignore scale weights
+                    continue
+
                 value = f.get_tensor(key)
 
                 # Save original device
@@ -318,10 +321,17 @@ def load_safetensors_with_fp8_optimization(
 
                 original_dtype = value.dtype
                 if original_dtype.itemsize == 1:
-                    raise ValueError(
-                        f"Layer {key} is already in {original_dtype} format. `--fp8_scaled` optimization should not be applied. Please use fp16/bf16/float32 model weights."
-                        + f" / レイヤー {key} は既に{original_dtype}形式です。`--fp8_scaled` 最適化は適用できません。FP16/BF16/Float32のモデル重みを使用してください。"
-                    )
+                    old_scale_key = key.replace(".weight", ".weight_scale")
+                    new_scale_key = key.replace(".weight", ".scale_weight")
+                    if old_scale_key in keys:
+                        state_dict[key] = value
+                        state_dict[new_scale_key] = f.get_tensor(old_scale_key)
+                        continue
+                    else:
+                        raise ValueError(
+                            f"Layer {key} is already in {original_dtype} format. `--fp8_scaled` optimization should not be applied. Please use fp16/bf16/float32 model weights."
+                            + f" / レイヤー {key} は既に{original_dtype}形式です。`--fp8_scaled` 最適化は適用できません。FP16/BF16/Float32のモデル重みを使用してください。"
+                        )
                 quantized_weight, scale_tensor = quantize_weight(
                     key, value, fp8_dtype, max_value, min_value, quantization_mode, block_size
                 )

@@ -811,6 +811,7 @@ def load_text_embedder(
 
     variant = model_version_info.qwen_variant
     is_8b = variant == "8B"
-    tokenizer_id = "Qwen/Qwen3-8B" if is_8b else "Qwen/Qwen3-4B"
+    # tokenizer_id = "Qwen/Qwen3-8B" if is_8b else "Qwen/Qwen3-4B"
+    tokenizer_id = None
     tokenizer, qwen3 = load_qwen3(ckpt_path, dtype, device, disable_mmap, state_dict, is_8b=is_8b, tokenizer_id=tokenizer_id)
     return Qwen3Embedder(tokenizer, qwen3)
