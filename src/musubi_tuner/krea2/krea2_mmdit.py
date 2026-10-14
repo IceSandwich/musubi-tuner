@@ -137,6 +137,7 @@ class RMSNorm(torch.nn.Module):
         t = F.rms_norm(t, (self.features,), eps=self.eps, weight=(self.scale.float() + 1.0))
         return t.to(dtype)
 
+from ice_scripts.comfyops import mixed_precision_ops
 
 class SwiGLU(torch.nn.Module):
     def __init__(self, features: int, multiplier: int, bias: bool = False, multiple: int = 128):
@@ -145,9 +146,9 @@ class SwiGLU(torch.nn.Module):
         mlpdim = int(2 * features / 3) * multiplier
         mlpdim = multiple * ((mlpdim + multiple - 1) // multiple)
 
-        self.gate = torch.nn.Linear(features, mlpdim, bias=bias)
-        self.up = torch.nn.Linear(features, mlpdim, bias=bias)
-        self.down = torch.nn.Linear(mlpdim, features, bias=bias)
+        self.gate = mixed_precision_ops.Linear(features, mlpdim, bias=bias)
+        self.up = mixed_precision_ops.Linear(features, mlpdim, bias=bias)
+        self.down = mixed_precision_ops.Linear(mlpdim, features, bias=bias)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.down(F.silu(self.gate(x)) * self.up(x))
@@ -160,12 +161,12 @@ class Attention(torch.nn.Module):
         self.kvheads = kvheads if kvheads is not None else heads
         self.headdim = dim // self.heads
 
-        self.wq = torch.nn.Linear(dim, self.headdim * self.heads, bias=bias)
-        self.wk = torch.nn.Linear(dim, self.headdim * self.kvheads, bias=bias)
-        self.wv = torch.nn.Linear(dim, self.headdim * self.kvheads, bias=bias)
-        self.gate = torch.nn.Linear(dim, dim, bias=bias)
+        self.wq = mixed_precision_ops.Linear(dim, self.headdim * self.heads, bias=bias)
+        self.wk = mixed_precision_ops.Linear(dim, self.headdim * self.kvheads, bias=bias)
+        self.wv = mixed_precision_ops.Linear(dim, self.headdim * self.kvheads, bias=bias)
+        self.gate = mixed_precision_ops.Linear(dim, dim, bias=bias)
         self.qknorm = QKNorm(self.headdim)
-        self.wo = torch.nn.Linear(dim, dim, bias=bias)
+        self.wo = mixed_precision_ops.Linear(dim, dim, bias=bias)
 
     def forward(self, qkv: Tensor, freqs: Tensor | None = None, attn_params: AttentionParams | None = None) -> Tensor:
         q, k, v, gate = self.wq(qkv), self.wk(qkv), self.wv(qkv), self.gate(qkv)

@@ -14,3 +14,6 @@ AGENTS.md
 .vscode/settings.json
 .mcp.json
 references/
+samples/
+working/
+models/

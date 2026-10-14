@@ -304,7 +304,9 @@ def load_safetensors(
         device = torch.device(device) if device is not None else None
         with MemoryEfficientSafeOpen(path, disable_numpy_memmap=disable_numpy_memmap) as f:
             for key in f.keys():
-                state_dict[key] = f.get_tensor(key, device=device, dtype=dtype)
+                state_dict[key] = f.get_tensor(key, device=device)
+            from ice_scripts.comfyops import postprocess_comfy_safetensor
+            postprocess_comfy_safetensor(f.metadata(), state_dict)
         synchronize_device(device)
         return state_dict
     else:

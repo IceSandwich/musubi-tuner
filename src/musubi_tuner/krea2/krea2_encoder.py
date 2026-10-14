@@ -132,6 +132,23 @@ def _load_qwen3_vl_model(
     sd = load_split_weights(model_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
     sd = _convert_comfyui_qwen3vl_state_dict(sd)
 
+    from musubi_tuner.ideogram4.ideogram4_quantized_loading import is_fp8_state_dict
+    from musubi_tuner.ideogram4.ideogram4_utils import _prepare_qwen3_vl_fp8_state_dict
+    from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
+    if is_fp8_state_dict(sd):
+        print(f"[+] Using fp8 for {model_path}")
+        sd["lm_head.weight"] = sd['model.language_model.embed_tokens.weight']
+        sd = _prepare_qwen3_vl_fp8_state_dict(sd, device=device, dtype=torch.bfloat16)
+        apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
+        def dequant_other_tensors(sd: dict[str, torch.Tensor], dtype: torch.dtype): # leave layernorm tensors bfloat16
+            layers = [ x for x in sd.keys() if x.endswith('_layernorm.weight') ]
+            for x in ['lm_head.weight', 'model.language_model.embed_tokens.weight']:
+                if x in sd: layers.append(x)
+            for x in layers:
+                sd[x] = sd.pop(x).to(dtype=dtype)
+        dequant_other_tensors(sd, dtype=torch.bfloat16)
+        dtype = None # avoid model.to(dtype)
+    
     info = model.load_state_dict(sd, strict=False, assign=True)
     # Qwen3-VL-4B ties the LM head to the input embeddings (tie_word_embeddings=true), so the
     # checkpoint omits lm_head.weight; re-tie after loading to materialize it.
@@ -188,6 +205,7 @@ class Qwen3VLConditioner(torch.nn.Module):
         self.prompt_template_encode_suffix = "<|im_end|>\n<|im_start|>assistant\n"
         self.prompt_template_encode_start_idx = 34
         self.prompt_template_encode_suffix_start_idx = 5
+        # self.device = torch.device("cuda")
 
     def forward(self, text: list[str]) -> tuple[Tensor, Tensor]:
         prefix_idx = self.prompt_template_encode_start_idx
