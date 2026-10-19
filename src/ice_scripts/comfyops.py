@@ -10,6 +10,7 @@ import json
 import torch
 
 from comfy import ops  # Always import this to fix issue: 'torch._C._CudaDeviceProperties' object has no attribute 'shared_memory_per_block'
+from comfy.quant_ops import QUANT_ALGOS
 from comfy.utils import convert_old_quants
 from comfy_kitchen.tensor import QuantizedTensor
 # from comfy.text_encoders.qwen3vl import _make_qwen3vl_model
@@ -23,16 +24,34 @@ mixed_precision_ops: TypeHintForMixedPrecisionOps = ops.mixed_precision_ops({}, 
 
 @torch.compiler.disable
 class PatchedMixedPrecisionOpsLinear(mixed_precision_ops.Linear):
-    def _forward(self, input, weight, bias):
-        scale = getattr(self, 'input_scale', None)
-        if scale is not None:
-            scale = comfy.model_management.cast_to_device(scale, input.device, None)
+	def forward(self, input, *args, **kwargs):
+		_use_quantized = (
+			getattr(self, 'layout_type', None) is not None and
+			not isinstance(input, QuantizedTensor) and not self._full_precision_mm and
+			not getattr(self, 'comfy_force_cast_weights', False) and
+			len(self.weight_function) == 0 and len(self.bias_function) == 0
+		)
+		quantize_input = QUANT_ALGOS.get(getattr(self, 'quant_format', None), {}).get("quantize_input", True)
+		if quantize_input == False and getattr(self, 'quant_format', None) == "convrot_w4a4":
+			quantize_input = True
 
-        compute_dtype = input.dtype
-        output = ops.QuantLinearFunc.apply(
-            input, weight, bias, self.layout_type, scale, compute_dtype
-        )
-        return output
+		# Training path: quantized forward with compute_dtype backward via autograd function
+		if (input.requires_grad and _use_quantized and quantize_input):
+			# ModelOpt AWQ-style smoothing
+			pre_quant_scale = getattr(self, 'pre_quant_scale', None)
+			if pre_quant_scale is not None:
+				input = input * comfy.model_management.cast_to_device(pre_quant_scale, input.device, input.dtype)
+
+			scale = getattr(self, 'input_scale', None)
+			if scale is not None:
+				scale = comfy.model_management.cast_to_device(scale, input.device, None)
+
+			return ops.QuantLinearFunc.apply(
+				input, self.weight, self.bias, self.layout_type, scale, input.dtype
+			)
+	
+		return super().forward(input, *args, **kwargs)
+
 mixed_precision_ops.Linear = PatchedMixedPrecisionOpsLinear
 
 def postprocess_comfy_safetensor(metadata: dict[str, any], state_dict: dict[str, torch.Tensor]):
