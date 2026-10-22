@@ -20,6 +20,8 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_QWEN_IMAGE_FULL,
     ARCHITECTURE_WAN_FULL,
     ARCHITECTURE_Z_IMAGE_FULL,
+
+    ARCHITECTURE_ANIMA_FULL,
 )
 from musubi_tuner.minimax_h3 import packing as h3_packing
 from musubi_tuner.minimax_h3 import text_encoder as h3_text_encoder
@@ -245,6 +247,16 @@ def save_latent_cache_krea2(item_info: ItemInfo, latent: torch.Tensor):
 
     save_latent_cache_common(item_info, sd, ARCHITECTURE_KREA2_FULL)
 
+def save_latent_cache_anima(item_info: ItemInfo, latent: torch.Tensor):
+    """Same from save_latent_cache_krea2
+    """
+    assert latent.dim() == 4, "latent should be 4D tensor (channel, frame, height, width)"
+
+    _, F, H, W = latent.shape
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_ANIMA_FULL)
 
 def save_latent_cache_kandinsky5(
     item_info: ItemInfo,
@@ -483,6 +495,15 @@ def save_text_encoder_output_cache_krea2(item_info: ItemInfo, embed: torch.Tenso
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_KREA2_FULL)
 
+
+def save_text_encoder_output_cache_anima(item_info: ItemInfo, embed: torch.Tensor, ids: torch.Tensor):
+    sd = {}
+    dtype_str = dtype_to_str(embed.dtype)
+    sd[f"text_embeds_{dtype_str}"] = embed.detach().cpu() # text_embeds_bfloat16
+    dtype_str = dtype_to_str(ids.dtype)
+    sd[f"h5ids_{dtype_str}"] = ids.detach().cpu() # h5ids_int64
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_ANIMA_FULL)
 
 def save_text_encoder_output_cache_kandinsky5(
     item_info: ItemInfo, text_embeds: torch.Tensor, pooled_embed: torch.Tensor, attention_mask: torch.Tensor

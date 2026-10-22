@@ -26,6 +26,9 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_QWEN_IMAGE_LAYERED,
     ARCHITECTURE_WAN,
     ARCHITECTURE_Z_IMAGE,
+
+    ARCHITECTURE_ANIMA,
+    ARCHITECTURE_MOSS,
 )
 from musubi_tuner.dataset.media_utils import divisible_by
 from musubi_tuner.utils.model_utils import remove_dtype_suffix
@@ -54,6 +57,9 @@ class BucketSelector:
     RESOLUTION_STEPS_KREA2 = 16  # latent f8 (VAE compression 8) x patch 2 = align 16
     RESOLUTION_STEPS_MINIMAX_H3 = 32
 
+    RESOLUTION_STEPS_ANIMA = 16
+    RESOLUTION_STEPS_MOSSI = 16
+
     ARCHITECTURE_STEPS_MAP = {
         ARCHITECTURE_HUNYUAN_VIDEO: RESOLUTION_STEPS_HUNYUAN,
         ARCHITECTURE_WAN: RESOLUTION_STEPS_WAN,
@@ -72,6 +78,9 @@ class BucketSelector:
         ARCHITECTURE_IDEOGRAM4: RESOLUTION_STEPS_IDEOGRAM4,
         ARCHITECTURE_KREA2: RESOLUTION_STEPS_KREA2,
         ARCHITECTURE_MINIMAX_H3: RESOLUTION_STEPS_MINIMAX_H3,
+
+        ARCHITECTURE_ANIMA: RESOLUTION_STEPS_ANIMA,
+        ARCHITECTURE_MOSS: RESOLUTION_STEPS_MOSSI,
     }
 
     def __init__(

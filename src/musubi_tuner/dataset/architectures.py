@@ -34,6 +34,11 @@ ARCHITECTURE_KREA2_FULL = "krea2"
 ARCHITECTURE_MINIMAX_H3 = "mmh3"
 ARCHITECTURE_MINIMAX_H3_FULL = "minimax_h3"
 
+ARCHITECTURE_ANIMA = "ani"
+ARCHITECTURE_ANIMA_FULL = "anima"
+ARCHITECTURE_MOSS = "mossi"
+ARCHITECTURE_MOSS_FULL = "moss_image"
+
 
 def round_down_frame_count(frame_count: int, architecture: str, vae_frame_stride: int) -> int:
     if architecture == ARCHITECTURE_MINIMAX_H3:

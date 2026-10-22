@@ -9,6 +9,7 @@ sys.path.append(str(comfyui_folder.absolute()))
 import json
 import torch
 
+import comfy
 from comfy import ops  # Always import this to fix issue: 'torch._C._CudaDeviceProperties' object has no attribute 'shared_memory_per_block'
 from comfy.quant_ops import QUANT_ALGOS
 from comfy.utils import convert_old_quants
@@ -58,6 +59,46 @@ def postprocess_comfy_safetensor(metadata: dict[str, any], state_dict: dict[str,
 	if "_quantization_metadata" in metadata: # for quantized dit
 		print("[+] Detected comfy metadata")
 		state_dict, _ = convert_old_quants(state_dict, metadata=metadata)
+
+
+# https://arxiv.org/pdf/2501.17116
+class INT8_DGE_Linear(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, activation, weight):
+        # 1. 正常的 INT8 Fake Quantize 前向传播（硬件友好的硬量化）
+        # 假设我们有 scale 缩放因子
+        scale_w = 127.0 / weight.abs().max()
+        weight_q = torch.round(weight * scale_w) / scale_w
+        
+        # 保存全精度的输入，供反向传播 DGE 算导数
+        ctx.save_for_backward(activation, weight, torch.tensor(1.0 / scale_w))
+        
+        # 2. 跑前向矩阵乘法 (GEMM)
+        return torch.matmul(activation, weight_q.t())
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        activation, weight, delta_tensor = ctx.saved_tensors
+        delta = delta_tensor.item() # 获取当前的量化步长
+        
+        # 1. 标准求导（对应 STE 路径）
+        grad_activation = torch.matmul(grad_output, weight)
+        grad_weight_ste = torch.matmul(grad_output.t(), activation)
+        
+        # 2. 计算 DGE 梯度修正项（核心改动！）
+        k = 5
+        # 归一化缩放
+        x_norm = (2.0 * weight / delta) - 1.0
+        # 按照论文公式计算导数修正系数
+        grad_correction = (1.0 / k) * torch.pow(torch.abs(x_norm) + 1e-7, (1.0 / k) - 1.0)
+        # 工程截断，防止死区梯度爆炸
+        grad_correction = torch.clamp(grad_correction, max=3.0) 
+        
+        # 3. 将修正项应用到权重的梯度上
+        grad_weight = grad_weight_ste * grad_correction
+        
+        return grad_activation, grad_weight
+
 
 def test_convrot_w4a4_loads_into_params():
 	"""ConvRot W4A4 checkpoints must load as the dedicated kitchen layout."""
