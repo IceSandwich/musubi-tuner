@@ -3,7 +3,8 @@ from pathlib import Path
 module_src = Path(__file__).parent / "src"
 sys.path.append(str(module_src.absolute()))
 
-from musubi_tuner.moss_image_cache_latents import main
+from musubi_tuner.moss_image.moss_image_adapter import MossImageAdapter
 
 if __name__ == "__main__":
-    main()
+    adapter = MossImageAdapter()
+    adapter.main_cache_latents()
