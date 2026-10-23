@@ -7,6 +7,7 @@ import argparse
 import os
 from musubi_tuner.dataset.image_video_dataset import ItemInfo
 from musubi_tuner.modules.custom_offloading_utils import BlockSwapConfig
+from musubi_tuner.hv_train_network import DiTOutput
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -20,22 +21,93 @@ def shrink_hidden_state(hidden_state: torch.Tensor, mask: torch.Tensor):
     embed = hidden_state[valid]
     return embed
 
-def pad_text_embeds(embeds_list: typing.List[torch.Tensor], max_length: typing.Optional[int] = None) -> typing.Tuple[torch.Tensor, torch.Tensor]:
-    """Right-pad a list of [L_i, C] tensors to [B, L, C] and return the mask [B, L] (int32, 1 = valid)."""
-    length = max(e.shape[0] for e in embeds_list)
+def pad_text_embeds(
+    embeds_list: typing.List[torch.Tensor],
+    max_length: typing.Optional[int] = None,
+) -> typing.Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Right-pad a list of variable-length tensors to a fixed-length batch tensor.
+
+    Each tensor in embeds_list has shape (L_i, *), where L_i is the sequence length
+    and * represents any number of trailing dimensions (e.g., (), (D,), (layers, D)).
+    All tensors must share the same trailing dimensions.
+
+    The function pads all sequences to the same length (either the maximum L_i in the
+    batch or a user-specified max_length, whichever is larger), stacks them into a
+    single batch tensor, and returns a corresponding boolean-style mask indicating
+    which positions are valid (1 = original token, 0 = padding).
+
+    Args:
+        embeds_list: A list of torch.Tensors, each of shape (L_i, *).
+                     All tensors must have identical trailing dimensions (*).
+        max_length: Optional target length. If provided, all sequences will be padded
+                    to at least this length. If None, the longest sequence in the
+                    current batch determines the padding length.
+
+    Returns:
+        A tuple of (padded_embeds, mask):
+            - padded_embeds: torch.Tensor of shape (B, L, *), where B = len(embeds_list),
+              L = max(actual lengths, max_length). Original embeddings are placed at the
+              beginning of each sequence; remaining positions are zero-padded.
+            - mask: torch.Tensor of shape (B, L) with dtype torch.int32. Entry (i, j) = 1
+              if position j in sample i contains an original embedding, and 0 if it is
+              padding.
+
+    Raises:
+        ValueError: If embeds_list is empty.
+        RuntimeError: If the tensors in embeds_list have incompatible trailing dimensions.
+
+    Example:
+        >>> e1 = torch.randn(3, 4)   # (L=3, D=4)
+        >>> e2 = torch.randn(5, 4)   # (L=5, D=4)
+        >>> embeds, mask = pad_text_embeds([e1, e2])
+        >>> embeds.shape
+        torch.Size([2, 5, 4])
+        >>> mask
+        tensor([[1, 1, 1, 0, 0],
+                [1, 1, 1, 1, 1]], dtype=torch.int32)
+
+        >>> e3 = torch.randn(2, 6, 8)  # (L=2, layers=6, hidden=8)
+        >>> e4 = torch.randn(4, 6, 8)  # (L=4, layers=6, hidden=8)
+        >>> embeds, mask = pad_text_embeds([e3, e4], max_length=8)
+        >>> embeds.shape
+        torch.Size([2, 8, 6, 8])
+        >>> mask.shape
+        torch.Size([2, 8])
+    """
+    if not embeds_list:
+        raise ValueError("embeds_list cannot be empty.")
+
+    # Determine target sequence length
+    actual_max_len = max(e.shape[0] for e in embeds_list)
+    target_len = actual_max_len
     if max_length is not None:
-        length = max(length, max_length)
+        target_len = max(actual_max_len, max_length)
+
+    # Infer output shape: (B, L, *) where * preserves all trailing dims
     first = embeds_list[0]
-    embeds = first.new_zeros(len(embeds_list), length, first.shape[-1])
-    mask = torch.zeros(len(embeds_list), length, dtype=torch.int32, device=first.device)
-    for i, e in enumerate(embeds_list):
-        embeds[i, : e.shape[0]] = e
-        mask[i, : e.shape[0]] = 1
-    return embeds, mask
+    batch_size = len(embeds_list)
+    output_shape = (batch_size, target_len) + first.shape[1:]
+
+    # Pre-allocate padded tensor and mask
+    padded = first.new_zeros(output_shape)
+    mask = torch.zeros(batch_size, target_len, dtype=torch.int32, device=first.device)
+
+    # Copy original embeddings and set mask bits
+    for i, emb in enumerate(embeds_list):
+        seq_len = emb.shape[0]
+        padded[i, :seq_len] = emb
+        mask[i, :seq_len] = 1
+
+    return padded, mask
 
 class Conditioner(abc.ABC):
     @abc.abstractmethod
     def encode_text(self, text: typing.List[str]) -> typing.Dict[str, torch.Tensor]:
+        """
+        output with prefix varlen_ to avoid stacking in training batch.
+        output with subfix _mask will be used for trimming with same key tensor in cache_cond.
+        """
         raise NotImplementedError()
     
     @abc.abstractmethod
@@ -79,6 +151,21 @@ class DiTNetwork(abc.ABC):
     
     def get_prefer_dtype(self) -> torch.dtype:
         return torch.bfloat16
+    
+    @abc.abstractmethod
+    def get_contexts_from_batch(self, batch: typing.Dict[str, torch.Tensor]) -> typing.Dict[str, torch.Tensor]:
+        """
+        Conditioner传递的数据会去掉 varlen_ 前缀
+        """
+        raise NotImplementedError()
+    
+    @abc.abstractmethod
+    def call_dit(self, noisy_model_input: torch.Tensor, timesteps: torch.Tensor, contexts: typing.Dict[str, torch.Tensor], accelerator: Accelerator, args: typing.Dict[str, typing.Any] = {}) -> torch.Tensor:
+        """
+        请调用 get_contexts_from_batch 获取数据。
+        传递的 noisy_model_input 维度是 (B, frame_len, channel, height, width)
+        """
+        raise NotImplementedError()
 
     @torch.inference_mode()
     def generate_latents(
@@ -162,7 +249,11 @@ class DiTNetwork(abc.ABC):
                 pbar.update()
 
         return latents
-
+    
+    @abc.abstractmethod
+    def get_dit_blocks_module(self) -> torch.nn.ModuleList:
+        raise NotImplementedError()
+    
 class AutoEncoder(abc.ABC):
     @abc.abstractmethod
     def get_name(self) -> str:
@@ -587,6 +678,9 @@ class Module(abc.ABC):
         if args.bell:
             print("\a")
 
+    def setup_train_network_parser(self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        return parser
+
     def main_train_network(self):
         from musubi_tuner.hv_train_network import (
             DiTOutput,
@@ -603,6 +697,19 @@ class Module(abc.ABC):
                 self.snt_dit = that.create_ditnetwork()
                 self.snt_vae = that.create_autoencoder()
 
+            def handle_model_specific_args(self, args: argparse.Namespace):
+                self._i2v_training = False
+                self._control_training = False
+                self.default_guidance_scale = 1.0  # K2 t2i, not used at train time
+
+            @property
+            def architecture(self) -> str:
+                return that.get_model_architecture()[0]
+
+            @property
+            def architecture_full_name(self) -> str:
+                return that.get_model_architecture()[1]
+
             def load_vae(self, args: argparse.Namespace, vae_dtype: torch.dtype, vae_path: str):
                 logger.info(f"Loading VAE model from {args.vae}")
                 self.snt_vae.load_model(args.vae)
@@ -610,7 +717,7 @@ class Module(abc.ABC):
             
             def load_transformer(self, accelerator: Accelerator, args: argparse.Namespace, dit_path: str, attn_mode: str, split_attn: bool, loading_device: str, dit_weight_dtype: torch.dtype | None):
                 self.snt_dit.load_model(
-                    dit_path=args.pretrained_model_name_or_path,
+                    dit_path=args.dit,
                     attn_mode=attn_mode,
                     split_attn=args.split_attn,
                     device=accelerator.device,
@@ -627,5 +734,84 @@ class Module(abc.ABC):
                 # kernels are not dynamo-traceable.
                 disable_linear = self.blocks_to_swap > 0
                 from musubi_tuner.utils import model_utils
-                return model_utils.compile_transformer(args, model, [model.blocks], disable_linear=disable_linear)
+                return model_utils.compile_transformer(args, model, [self.snt_dit.get_dit_blocks_module()], disable_linear=disable_linear)
+            
+            def scale_shift_latents(self, latents):
+                return latents
+            
+            def call_dit(
+                self,
+                args: argparse.Namespace,
+                accelerator: Accelerator,
+                transformer,
+                latents: torch.Tensor,
+                batch: dict[str, torch.Tensor],
+                noise: torch.Tensor,
+                noisy_model_input: torch.Tensor,
+                timesteps: torch.Tensor,
+                network_dtype: torch.dtype,
+                **kwargs,
+            ) -> DiTOutput:
+                contexts = self.snt_dit.get_contexts_from_batch(batch)
+                model_pred = self.snt_dit.call_dit(noisy_model_input, timesteps, contexts, accelerator, {
+                    "gradient_checkpointing": args.gradient_checkpointing,
+                })
+                # Rectified flow target: v = noise - x0
+                target = noise - latents
+                return DiTOutput(pred=model_pred, target=target)
+        
+        from musubi_tuner.training.parser_common import setup_parser_common
+        from musubi_tuner.hv_train_network import read_config_from_file
+        parser = setup_parser_common()
+        parser = that.setup_train_network_parser(parser)
+        args = parser.parse_args()
+        args = read_config_from_file(args, parser)
+
+        trainer = SubNetworkTrainer()
+        args.dit_dtype = str(trainer.snt_dit.get_prefer_dtype()).strip("torch.")
+        trainer.train(args)
+
+    def convert_lora_statedict_to_comfy(self, sd: typing.Dict[str, torch.Tensor]) -> typing.Dict[str, torch.Tensor]:
+        suffix = [ "q", "k", "v" ]
+        lora_ud = ["lora_down", "lora_up"]
+        for k in list(sd.keys()):
+            if k not in sd: continue
+            sk = k.split('.')
+            if sk[0].endswith("_qkv") and sk[1] in lora_ud and sk[2].isnumeric() and sk[3] == "weight":
+                basename = sk[0][:-len('_qkv')]
+                renames = {}
+                for ind, sf in enumerate(suffix):
+                    for ln in lora_ud:
+                        old_name = f"{basename}_qkv.{ln}.{ind}.weight"
+                        new_name = f"{basename}_{sf}.{ln}.weight"
+                        assert old_name in sd
+                        renames[old_name] = new_name
+                for old_name, new_name in renames.items():
+                    v = sd.pop(old_name)
+                    sd[new_name] = v
+                alpha_name = f"{basename}_qkv.alpha"
+                assert alpha_name in sd
+                alpha = sd.pop(alpha_name)
+                for sf in suffix:
+                    new_name = f"{basename}_{sf}.alpha"
+                    sd[new_name] = alpha.clone()
+        return sd
+
+    def main_convert_lora_to_comfy(self):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--input", type=str, required=True)
+        parser.add_argument("--output", type=str, required=True)
+        args = parser.parse_args()
+
+        import safetensors
+        with safetensors.safe_open(args.input, framework="pt") as f:
+            sd = { k: f.get_tensor(k) for k in f.keys() }
+            md = f.metadata()
+
+        sd = self.convert_lora_statedict_to_comfy(sd)
+
+        import safetensors.torch
+        safetensors.torch.save_file(sd, args.output, md)
+        print(f"Save to {args.output} successfully.")
+
 

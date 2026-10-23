@@ -25,6 +25,8 @@ from musubi_tuner.dataset.image_video_dataset import (
     ARCHITECTURE_KREA2,
     ARCHITECTURE_MINIMAX_H3,
     ARCHITECTURE_Z_IMAGE,
+
+    ARCHITECTURE_MOSS,
 )
 
 logger = logging.getLogger(__name__)
@@ -237,6 +239,9 @@ def build_metadata(
     elif architecture == ARCHITECTURE_MINIMAX_H3:
         arch = ARCH_MINIMAX_H3
         impl = IMPL_MINIMAX_H3
+    elif architecture == ARCHITECTURE_MOSS:
+        arch = "Moss-Image"
+        impl = ""
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 

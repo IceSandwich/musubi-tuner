@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Type, Union
 from transformers import CLIPTextModel
 import torch
 import torch.nn as nn
+from ice_scripts.comfyops import mixed_precision_ops
 
 import logging
 
@@ -77,7 +78,7 @@ class LoRAModule(torch.nn.Module):
         else:
             # conv2d not supported
             assert sum(split_dims) == out_dim, "sum of split_dims must be equal to out_dim"
-            assert org_module.__class__.__name__ == "Linear", "split_dims is only supported for Linear"
+            assert org_module.__class__.__name__ == "Linear" or org_module.__class__.__name__ == mixed_precision_ops.Linear.__name__, "split_dims is only supported for Linear"
             # print(f"split_dims: {split_dims}")
             self.lora_down = torch.nn.ModuleList(
                 [torch.nn.Linear(in_dim, self.lora_dim, bias=False) for _ in range(len(split_dims))]
@@ -586,7 +587,6 @@ class LoRANetwork(torch.nn.Module):
                         module = root_module  # search all modules
 
                     for child_name, child_module in module.named_modules():
-                        from ice_scripts.comfyops import mixed_precision_ops
                         is_linear = child_module.__class__.__name__ == "Linear" or child_module.__class__.__name__ == mixed_precision_ops.Linear.__name__
                         is_conv2d = child_module.__class__.__name__ == "Conv2d"
                         is_conv3d = child_module.__class__.__name__ == "Conv3d"
@@ -640,6 +640,13 @@ class LoRANetwork(torch.nn.Module):
                                     skipped.append(lora_name)
                                 continue
 
+                            split_dims = None
+                            if child_name.endswith(".qkv"):
+                                if child_module.in_features * 3 == child_module.out_features:
+                                    split_dims = [ child_module.in_features, child_module.in_features, child_module.in_features ]
+                                else:
+                                    raise ValueError("Unknown case")
+
                             lora = module_class(
                                 lora_name,
                                 child_module,
@@ -649,6 +656,7 @@ class LoRANetwork(torch.nn.Module):
                                 dropout=dropout,
                                 rank_dropout=rank_dropout,
                                 module_dropout=module_dropout,
+                                split_dims=split_dims,
                                 **self.module_kwargs,
                             )
                             loras.append(lora)
