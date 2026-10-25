@@ -529,6 +529,7 @@ class Module(abc.ABC):
 
         dit, ae = build_pipeline()
 
+        @torch.no_grad()
         def encode(prompts, negative_prompts, cfg: bool):
             """Encode prompts with the Qwen3-VL conditioner, shuttling it to ``te_device`` for the call.
 
@@ -538,7 +539,7 @@ class Module(abc.ABC):
             """
             logger.info(f"Encoding prompts with {encoder.get_name()}")
             def decompose_result(result: typing.Dict[str, torch.Tensor]):
-                return result["embeds"], result["embeds_mask"]
+                return result["varlen_embeds"], result["varlen_embeds_mask"]
             txt, txtmask = decompose_result(encoder.encode_text(prompts))
             untxt, untxtmask = None, None
             if cfg:
@@ -568,7 +569,7 @@ class Module(abc.ABC):
         ):
             scale = cfg_scale
             # flow_shift = float(prompt_dict.get("flow_shift", DEFAULT_SAMPLE_FLOW_SHIFT))
-            flow_shift = 5.0
+            flow_shift = 3.0
             # uncond_skip_layers = parse_skip_layers(args.sample_uncond_skip_layers)
             uncond_skip_layers = ()
 
@@ -764,7 +765,13 @@ class Module(abc.ABC):
         from musubi_tuner.hv_train_network import read_config_from_file
         parser = setup_parser_common()
         parser = that.setup_train_network_parser(parser)
+        parser.add_argument("--print_cmdline_only", action="store_true")
         args = parser.parse_args()
+        if args.print_cmdline_only:
+            import sys
+            print("=== Command line")
+            print(f"\tpython {sys.argv[0]} --dataset_config \"{args.dataset_config}\" --config_file \"{args.config_file}\"")
+            return
         args = read_config_from_file(args, parser)
 
         trainer = SubNetworkTrainer()

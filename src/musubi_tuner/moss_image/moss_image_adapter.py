@@ -83,21 +83,7 @@ class MossDiT(general_adapter.DiTNetwork):
         return 1, 128, height // 16, width // 16
     
     def get_contexts_from_batch(self, batch: typing.Dict[str, torch.Tensor]) -> typing.Dict[str, torch.Tensor]:
-        # embed = batch["embeds"]  # list of (valid_len, num_layers, hidden)
-        # txt_seq_lens = [x.shape[0] for x in embed]
-        # max_len = max(txt_seq_lens)
-        # # pad along the sequence axis (dim 0): F.pad pads last dim first, so (0,0)x2 then (0, pad)
-        # from torch.nn import functional as F
-        # embed = [F.pad(x, (0, 0, 0, 0, 0, max_len - x.shape[0])) for x in embed]
-        # txtctx = torch.stack(embed, dim=0).to(device=self.model.device, dtype=self.get_prefer_dtype())  # (B, max_len, L, D)
         txtctx, txtmask = general_adapter.pad_text_embeds(typing.cast(typing.List[torch.Tensor], batch["embeds"]))
-
-        # latents = batch["latents"]  # (B, C, 1, H, W)
-        # bsize = latents.shape[0]
-        # assert latents.shape[2] == 1, f"K2 expects single-frame latents (B,C,1,H,W), got {latents.shape}"
-        # txtmask = torch.zeros(bsize, max_len, device=self.model.device, dtype=torch.bool)
-        # for i, n in enumerate(txt_seq_lens):
-        #     txtmask[i, :n] = True
 
         return {
             "txtctx": txtctx,
@@ -105,8 +91,10 @@ class MossDiT(general_adapter.DiTNetwork):
         }
     
     def call_dit(self, noisy_model_input: torch.Tensor, timesteps: torch.Tensor, contexts: typing.Dict[str, torch.Tensor], accelerator: Accelerator, args: typing.Dict[str, typing.Any] = {}) -> torch.Tensor:
-        txtctx, txtmask = contexts["txtctx"].to(device=self.model.device), contexts["txtmask"].to(device=self.model.device)
+        txtctx, txtmask = contexts["txtctx"].to(device=accelerator.device), contexts["txtmask"].to(device=accelerator.device)
+        reshape_noisy_input = False
         if noisy_model_input.dim() == 5 and noisy_model_input.shape[1] == 1:
+            reshape_noisy_input = True
             noisy_model_input = noisy_model_input.squeeze(dim=1)
 
         # Gradient checkpointing (non-reentrant) needs an input which requires grad
@@ -116,7 +104,8 @@ class MossDiT(general_adapter.DiTNetwork):
 
         with accelerator.autocast():
             model_pred = self.model(noisy_model_input, timesteps, txtctx, txtmask)
-        model_pred = model_pred.unsqueeze(dim=1)
+        if reshape_noisy_input:
+            model_pred = model_pred.unsqueeze(dim=1)
         return model_pred
     
     def get_dit_blocks_module(self) -> torch.nn.ModuleList:
@@ -137,9 +126,11 @@ class Flux2AE(general_adapter.AutoEncoder):
     def to(self, device: str | torch.device | None = None, dtype: torch.dtype | None = None):
         self.ae = self.ae.to(device=device, dtype=dtype)
 
+    @torch.inference_mode()
     def decode_from_dit(self, tensor: torch.Tensor) -> torch.Tensor:
         return self.ae.decode_from_dit(tensor)
     
+    @torch.inference_mode()
     def encode_for_dit(self, tensor: torch.Tensor) -> torch.Tensor:
         latents = self.ae.encode(tensor.to(self.ae.device, dtype=self.ae.dtype))  # (B, C, 1, H, W)
         latents = self.ae.patchify_and_normalize(latents)
